@@ -1,4 +1,3 @@
-import argparse
 import ast
 import os
 import re
@@ -7,35 +6,17 @@ import time
 from collections import Counter, defaultdict
 from importlib.util import find_spec
 
+import click
+from rich.console import Console
+from rich.table import Table
+from rich.panel import Panel
+from rich.text import Text
 from stdlib_list import stdlib_list
-
-
-def parse_args():
-    parser = argparse.ArgumentParser(description="Analyze Python imports in a project")
-    parser.add_argument(
-        "project_root",
-        nargs="?",
-        default=".",
-        help="Root directory of the project to analyze (default: current directory)",
-    )
-    parser.add_argument(
-        "--show-local", action="store_true", help="Show local project imports"
-    )
-    parser.add_argument(
-        "--top-level-only",
-        action="store_true",
-        help="Show only top-level modules instead of full module names",
-    )
-    parser.add_argument(
-        "--include-gitignore",
-        action="store_true",
-        help="Include files that would be ignored by .gitignore",
-    )
-    return parser.parse_args()
 
 
 # 获取当前 Python 版本的标准库
 stdlib = set(stdlib_list())
+console = Console()
 
 
 def is_stdlib(module_name):
@@ -61,7 +42,8 @@ def is_project_module(module_name, project_root):
 def get_imports_from_file(file_path):
     with open(file_path, "r", encoding="utf-8") as f:
         try:
-            tree = ast.parse(f.read(), filename=file_path)
+            content = f.read()
+            tree = ast.parse(content, filename=file_path)
         except SyntaxError:
             return []
 
@@ -74,6 +56,28 @@ def get_imports_from_file(file_path):
             if node.module:
                 imports.append(node.module)
     return imports
+
+
+def find_module_imports(file_path, target_module):
+    """Find line numbers where a specific module is imported in a file."""
+    results = []
+    
+    with open(file_path, "r", encoding="utf-8") as f:
+        try:
+            content = f.readlines()
+        except UnicodeDecodeError:
+            return []
+    
+    for i, line in enumerate(content, 1):
+        line = line.strip()
+        # Check for direct imports
+        if re.search(rf'\bimport\s+{target_module}\b', line) or \
+           re.search(rf'\bimport\s+.*,\s*{target_module}\b', line) or \
+           re.search(rf'\bfrom\s+{target_module}\b', line) or \
+           re.search(rf'\bfrom\s+{target_module}\.\b', line):
+            results.append((i, line))
+    
+    return results
 
 
 def load_gitignore_patterns(project_root):
@@ -129,6 +133,32 @@ def collect_all_imports(project_root, use_top_level=False, include_gitignore=Fal
     return counter, file_count
 
 
+def find_files_importing_module(project_root, module_name, include_gitignore=False):
+    results = []
+    file_count = 0
+    
+    gitignore_patterns = (
+        [] if include_gitignore else load_gitignore_patterns(project_root)
+    )
+    
+    for root, _, files in os.walk(project_root):
+        for file in files:
+            if file.endswith(".py"):
+                file_path = os.path.join(root, file)
+                
+                # Skip files that match gitignore patterns
+                if is_ignored(file_path, project_root, gitignore_patterns):
+                    continue
+                
+                file_count += 1
+                import_lines = find_module_imports(file_path, module_name)
+                if import_lines:
+                    rel_path = os.path.relpath(file_path, project_root)
+                    results.append((rel_path, import_lines))
+    
+    return results, file_count
+
+
 def classify_imports(import_counter, project_root):
     categorized = defaultdict(list)
     for module, count in import_counter.items():
@@ -148,32 +178,93 @@ def print_result(categorized_imports, show_local=False):
     if show_local:
         categories.append("local")
 
+    category_colors = {
+        "third_party": "green",
+        "unknown": "yellow",
+        "stdlib": "blue",
+        "local": "magenta"
+    }
+
     for category in categories:
         items = sorted(categorized_imports.get(category, []), key=lambda x: -x[1])
         if items:
-            print(f"\n# {len(items)} unique {category.upper()} modules:")
+            console.print(f"\n[bold]{len(items)} unique {category.upper()} modules:[/bold]", style=category_colors[category])
+            
+            table = Table(show_header=True, header_style=f"bold {category_colors[category]}")
+            table.add_column("Module", style=category_colors[category])
+            table.add_column("Count", justify="right")
+            
             for mod, count in items:
-                print(f"{mod:<30} {count}")
+                table.add_row(mod, str(count))
+            
+            console.print(table)
 
 
-def main():
+def print_find_results(results):
+    if not results:
+        console.print("[bold red]No files found importing this module.[/bold red]")
+        return
+    
+    for file_path, lines in results:
+        panel = Panel(
+            "\n".join([f"Line {line_num}: [yellow]{line_content}[/yellow]" for line_num, line_content in lines]),
+            title=f"[bold blue]{file_path}[/bold blue]",
+            expand=False
+        )
+        console.print(panel)
+
+
+@click.group()
+def cli():
+    """Analyze Python imports in a project."""
+    pass
+
+
+@cli.command()
+@click.argument("project_root", type=click.Path(exists=True), default=".")
+@click.option("--show-local", is_flag=True, help="Show local project imports")
+@click.option("--top-level-only", is_flag=True, help="Show only top-level modules instead of full module names")
+@click.option("--include-gitignore", is_flag=True, help="Include files that would be ignored by .gitignore")
+def stats(project_root, show_local, top_level_only, include_gitignore):
+    """Analyze import statistics in a project."""
     start_time = time.time()
-    args = parse_args()
-    project_root = args.project_root
-    use_top_level = args.top_level_only
-
-    import_counter, file_count = collect_all_imports(
-        project_root,
-        use_top_level=use_top_level,
-        include_gitignore=args.include_gitignore,
-    )
-    categorized = classify_imports(import_counter, project_root)
-    print_result(categorized, show_local=args.show_local)
-
+    
+    with console.status("[bold green]Analyzing imports...[/bold green]"):
+        import_counter, file_count = collect_all_imports(
+            project_root,
+            use_top_level=top_level_only,
+            include_gitignore=include_gitignore,
+        )
+        categorized = classify_imports(import_counter, project_root)
+    
+    print_result(categorized, show_local=show_local)
+    
     elapsed_time = time.time() - start_time
-    print(f"\n# SUMMARY:")
-    print(f"Parsed {file_count} Python files in {elapsed_time:.2f} seconds")
+    console.print("\n[bold]SUMMARY:[/bold]")
+    console.print(f"Parsed [bold cyan]{file_count}[/bold cyan] Python files in [bold cyan]{elapsed_time:.2f}[/bold cyan] seconds")
+
+
+@cli.command()
+@click.argument("module_name")
+@click.argument("project_root", type=click.Path(exists=True), default=".")
+@click.option("--include-gitignore", is_flag=True, help="Include files that would be ignored by .gitignore")
+def find(module_name, project_root, include_gitignore):
+    """Find files importing a specific module."""
+    start_time = time.time()
+    
+    with console.status(f"[bold green]Searching for imports of '{module_name}'...[/bold green]"):
+        results, file_count = find_files_importing_module(
+            project_root,
+            module_name,
+            include_gitignore=include_gitignore,
+        )
+    
+    print_find_results(results)
+    
+    elapsed_time = time.time() - start_time
+    console.print("\n[bold]SUMMARY:[/bold]")
+    console.print(f"Found [bold cyan]{len(results)}[/bold cyan] files importing '[bold green]{module_name}[/bold green]' (searched [bold cyan]{file_count}[/bold cyan] files in [bold cyan]{elapsed_time:.2f}[/bold cyan] seconds)")
 
 
 if __name__ == "__main__":
-    main()
+    cli()
