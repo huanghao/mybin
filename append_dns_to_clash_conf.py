@@ -161,6 +161,7 @@ def main():
     """主函数"""
     args = parse_args()
     file_path = Path(args.file)
+    print(args.file)
 
     # 读取文件内容
     with open(file_path, "r", encoding="utf-8") as f:
