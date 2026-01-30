@@ -97,6 +97,35 @@ def handle_get(languages):
         else:
             print("Unknown language", lang, file=sys.stderr)
 
+def is_git_repo(path):
+    try:
+        subprocess.check_output(
+            ["git", "-C", path, "rev-parse", "--is-inside-work-tree"],
+            stderr=subprocess.STDOUT,
+        )
+        return True
+    except (OSError, subprocess.CalledProcessError):
+        return False
+
+def confirm_git_init():
+    answer = input("Current directory is not a git repo. Run git init? (yes/no): ")
+    return answer.strip().lower() in ("yes", "y")
+
+def ensure_gitignore(path):
+    target = os.path.join(path, gig)
+    if not os.path.exists(target):
+        open(target, "a").close()
+
+def handle_init(languages):
+    cwd = os.getcwd()
+    if not is_git_repo(cwd):
+        if not confirm_git_init():
+            print("Canceled: git init not confirmed.", file=sys.stderr)
+            sys.exit(1)
+        system(["git", "init"])
+    ensure_gitignore(cwd)
+    handle_get(languages)
+
 def parse_args(argv=None):
     epilog = textwrap.dedent(
         """\
@@ -106,6 +135,7 @@ def parse_args(argv=None):
           %(prog)s repo
           %(prog)s Python Global/macOS
           %(prog)s get Python Global/macOS
+          %(prog)s init Python Global/macOS
         """
     )
     parser = argparse.ArgumentParser(
@@ -121,6 +151,17 @@ def parse_args(argv=None):
 
     get_parser = subparsers.add_parser("get", help="Print one or more templates")
     get_parser.add_argument(
+        "languages",
+        nargs="+",
+        metavar="LANG",
+        help="Template name (e.g. Python, Global/macOS)",
+    )
+
+    init_parser = subparsers.add_parser(
+        "init",
+        help="Initialize git repo and .gitignore, then print templates",
+    )
+    init_parser.add_argument(
         "languages",
         nargs="+",
         metavar="LANG",
@@ -155,6 +196,8 @@ def main():
         handle_list()
     elif action == "repo":
         handle_repo()
+    elif action == "init":
+        handle_init(args.languages)
     else:
         handle_get(args.languages)
 
